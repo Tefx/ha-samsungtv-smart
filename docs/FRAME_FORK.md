@@ -87,8 +87,10 @@ warnings are inherited from the library's datetime convention.
 The canonical product version is `custom_components/samsungtv_smart/manifest.json`.
 Use SemVer: fixes increment PATCH, optional public interfaces increment MINOR,
 and incompatible interfaces increment MAJOR. The initial fork release is 0.15.0
-because it adds `tv_mode`. Fork versions do not have to match upstream versions;
-record the upstream base in release notes.
+because it adds `tv_mode`. Its packaging job exposed an annotated-tag checkout
+issue before producing a HACS asset; 0.15.1 fixes that packaging issue and is the
+first installable release. The original tag remains unchanged. Fork versions do
+not have to match upstream versions; record the upstream base in release notes.
 
 After updating the manifest, tests and documentation, commit and push the branch.
 Wait for **Frame regression** to pass, then create an immutable annotated tag and
