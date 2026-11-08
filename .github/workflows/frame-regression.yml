@@ -1,0 +1,30 @@
+name: Frame regression
+
+on:
+  push:
+    branches: [frame-stable]
+  pull_request:
+    branches: [frame-stable]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  frame-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install test tools
+        run: python -m pip install pytest==8.3.5 black==25.1.0
+      - name: Check changed Python files
+        run: >-
+          python -m black --check
+          custom_components/samsungtv_smart/media_player.py
+          custom_components/samsungtv_smart/api/samsungws.py
+          tests/test_frame_state.py
+      - name: Run Frame state and control regressions
+        run: python -m pytest --noconftest -o addopts= tests/test_frame_state.py

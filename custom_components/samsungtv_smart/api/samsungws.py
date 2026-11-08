@@ -295,6 +295,7 @@ class SamsungTVWS:
         self._ws_art = None
         self._client_art = None
         self._last_art_ping = datetime.min
+        self._last_art_query = datetime.min
         self._client_art_supported = 2
 
         self._ping = Ping(self.host)
@@ -776,6 +777,7 @@ class SamsungTVWS:
     def _get_artmode_status(self):
         """Detect current art mode based on received message."""
         _LOGGING.debug("Sending get_art_status")
+        self._last_art_query = datetime.utcnow()
         msg_data = {
             "request": "get_artmode_status",
             "id": gen_uuid(),
@@ -803,16 +805,14 @@ class SamsungTVWS:
         event = data.get("event", "")
         if event == "art_mode_changed":
             status = data.get("status", "")
-            if status == "on":
-                artmode_status = ArtModeStatus.On
-            else:
-                artmode_status = ArtModeStatus.Off
-        elif event == "artmode_status":
+            if status not in ("on", "off"):
+                return
+            artmode_status = ArtModeStatus.On if status == "on" else ArtModeStatus.Off
+        elif event in ("artmode_status", "get_artmode_status"):
             value = data.get("value", "")
-            if value == "on":
-                artmode_status = ArtModeStatus.On
-            else:
-                artmode_status = ArtModeStatus.Off
+            if value not in ("on", "off"):
+                return
+            artmode_status = ArtModeStatus.On if value == "on" else ArtModeStatus.Off
         elif event == "go_to_standby":
             artmode_status = ArtModeStatus.Unavailable
         elif event == "wakeup":
@@ -829,7 +829,10 @@ class SamsungTVWS:
                 self.send_key("KEY_POWER", key_press_delay=0)
             self._power_on_requested = False
 
+        changed = self._artmode_status != artmode_status
         self._artmode_status = artmode_status
+        if changed and self._status_callback is not None:
+            self._status_callback()
 
     @property
     def is_connected(self):
@@ -905,6 +908,8 @@ class SamsungTVWS:
             if difference >= MAX_WS_PING_INTERVAL:
                 self._artmode_status = ArtModeStatus.Unavailable
                 self._ws_art.close()
+            elif (datetime.utcnow() - self._last_art_query).total_seconds() >= 15:
+                self._get_artmode_status()
         elif self._ws_remote:
             self._start_client(start_all=True)
 

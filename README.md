@@ -6,6 +6,13 @@
 
 # HomeAssistant - SamsungTV Smart Component
 
+> **Maintained Frame fork:** this repository packages Frame state and standby fixes
+> on top of upstream v0.14.5. Install `Tefx/ha-samsungtv-smart` as a HACS custom
+> Integration repository to keep those fixes across HACS downloads and updates.
+> Do not keep both this fork and upstream installed for the same integration domain.
+> See [Frame behavior, migration and maintenance](docs/FRAME_FORK.md).
+> Household default-Art automations remain separate Home Assistant configuration.
+
 This is a custom component to allow control of SamsungTV devices in [HomeAssistant](https://home-assistant.io).
 Is a modified version of the built-in [samsungtv](https://www.home-assistant.io/integrations/samsungtv/) with some extra
  features.<br/>

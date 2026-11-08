@@ -263,6 +263,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
         # Device information from TV
         self._device_info: dict[str, Any] | None = None
+        self._physical_power_state: str | None = None
 
         # Save a reference to the imported config
         self._broadcast = config.get(CONF_BROADCAST_ADDRESS)
@@ -524,11 +525,22 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     async def _check_status(self):
         """Check TV status with WS and others method to check power status."""
 
+        # Learn device capabilities even when HA starts while the TV is in standby.
+        # Otherwise the ON-only info loader never discovers this Frame's power API.
+        info = None
+        self._physical_power_state = None
+        if self._device_info is None or self._get_device_spec("PowerState") is not None:
+            info = await self._async_load_device_info(force=True)
         if self._get_device_spec("PowerState") is not None:
             _LOGGER.debug("Checking if TV %s is on using device info", self._host)
-            # Ensure we get an updated value
-            info = await self._async_load_device_info(force=True)
-            return info is not None and info["device"]["PowerState"] == "on"
+            self._physical_power_state = (
+                info.get("device", {}).get("PowerState") if info else None
+            )
+            return (
+                self._physical_power_state == "on"
+                and self._ws.artmode_status
+                not in (ArtModeStatus.On, ArtModeStatus.Unavailable)
+            )
 
         result = self._ws.is_connected
         if result and self._st:
@@ -1059,8 +1071,29 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         """Return the optional state attributes."""
         data = {ATTR_IP_ADDRESS: self._host}
         if self._ws.artmode_status != ArtModeStatus.Unsupported:
-            status_on = self._ws.artmode_status == ArtModeStatus.On
-            data.update({ATTR_ART_MODE_STATUS: STATE_ON if status_on else STATE_OFF})
+            art_status = self._ws.artmode_status
+            data[ATTR_ART_MODE_STATUS] = (
+                STATE_ON
+                if art_status == ArtModeStatus.On
+                else STATE_OFF if art_status == ArtModeStatus.Off else "unavailable"
+            )
+        if self._get_device_spec("FrameTVSupport") == "true":
+            # Standby is distinct from Art Mode, which also reports PowerState=on.
+            power = self._physical_power_state
+            art_status = self._ws.artmode_status
+            data["tv_mode"] = (
+                "off"
+                if power in ("off", "standby")
+                else (
+                    "art"
+                    if power == "on" and art_status == ArtModeStatus.On
+                    else (
+                        "tv"
+                        if power == "on" and art_status == ArtModeStatus.Off
+                        else "unknown"
+                    )
+                )
+            )
         if self._st:
             picture_mode = self._st.picture_mode
             picture_mode_list = self._st.picture_mode_list
@@ -1204,14 +1237,16 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         """Turn the media player on."""
         cmd_power_on = "KEY_POWER"
         cmd_power_art = "KEY_POWER"
-        if set_art_mode:
+        # The Art API can retain its last mode while the panel is in standby.
+        panel_awake = self._physical_power_state not in ("off", "standby")
+        if set_art_mode and panel_awake:
             if self._ws.artmode_status == ArtModeStatus.Off:
                 # art mode from on
                 await self.async_send_command(cmd_power_art)
                 self._state = MediaPlayerState.OFF
                 return True
 
-        if self._ws.artmode_status == ArtModeStatus.On:
+        if panel_awake and self._ws.artmode_status == ArtModeStatus.On:
             if set_art_mode:
                 return False
             # power on from art mode
@@ -1257,7 +1292,10 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
 
     async def async_set_art_mode(self):
         """Turn the media player on setting in art mode."""
-        if (
+        # A sleeping Frame has not established its Art WebSocket after HA startup.
+        if self._physical_power_state in ("off", "standby"):
+            await self._async_turn_on(True)
+        elif (
             self._state == MediaPlayerState.ON
             and self.support_art_mode == ArtModeSupport.PARTIAL
         ):

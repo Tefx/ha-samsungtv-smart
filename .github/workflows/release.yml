@@ -1,29 +1,47 @@
-name: "Release"
+name: Release
 
 on:
   release:
-    types:
-      - "published"
+    types: [published]
 
 permissions: {}
 
 jobs:
   release:
-    name: "Release"
-    runs-on: "ubuntu-latest"
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: "Checkout the repository"
-        uses: "actions/checkout@v4.1.7"
-
-      - name: "ZIP the integration directory"
-        shell: "bash"
-        run: |
-          cd "${{ github.workspace }}/custom_components/samsungtv_smart"
-          zip samsungtv_smart.zip -r ./
-
-      - name: "Upload the ZIP file to the release"
-        uses: "softprops/action-gh-release@v2.0.8"
+      - uses: actions/checkout@v4
         with:
-          files: ${{ github.workspace }}/custom_components/samsungtv_smart/samsungtv_smart.zip
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run Frame regression tests
+        run: |
+          python -m pip install pytest==8.3.5
+          python -m pytest --noconftest -o addopts= tests/test_frame_state.py
+      - name: Verify release identity
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          test "$(git cat-file -t "$RELEASE_TAG")" = tag
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          manifest = json.loads(Path('custom_components/samsungtv_smart/manifest.json').read_text())
+          assert os.environ['RELEASE_TAG'] == 'v' + manifest['version']
+          assert manifest['domain'] == 'samsungtv_smart'
+          PY
+      - name: Package the HACS integration
+        working-directory: custom_components/samsungtv_smart
+        run: |
+          zip -qr "$RUNNER_TEMP/samsungtv_smart.zip" . -x '*.pyc' '*/__pycache__/*' '__pycache__/*'
+          unzip -t "$RUNNER_TEMP/samsungtv_smart.zip"
+      - name: Upload the HACS release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ runner.temp }}/samsungtv_smart.zip
+          fail_on_unmatched_files: true
