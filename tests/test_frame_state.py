@@ -57,6 +57,7 @@ MEDIA = methods(
     "SamsungTVDevice",
     [
         "_check_status",
+        "_get_art_status",
         "extra_state_attributes",
         "_async_power_on",
         "async_set_art_mode",
@@ -75,6 +76,12 @@ WS = methods(
 )
 
 
+def bind_art_status(device):
+    device._last_valid_art_status = None
+    device._get_art_status = lambda: MEDIA._get_art_status(device)
+    return device
+
+
 def test_frame_modes_and_rest_failure():
     for power, art, expected_state, expected_mode in [
         ("on", ArtModeStatus.On, False, "art"),
@@ -88,13 +95,14 @@ def test_frame_modes_and_rest_failure():
             _device_info={"device": {"PowerState": "on"}},
             _host="tv",
             _st=None,
-            _ws=SimpleNamespace(artmode_status=art),
+            _ws=SimpleNamespace(artmode_status=art, is_connected=True),
             entity_id="media_player.tv",
             _get_device_spec=lambda key: "true" if key == "FrameTVSupport" else "on",
             _async_load_device_info=AsyncMock(
                 return_value={"device": {"PowerState": power}} if power else None
             ),
         )
+        bind_art_status(device)
         assert asyncio.run(MEDIA._check_status(device)) is expected_state
         assert MEDIA.extra_state_attributes(device)["tv_mode"] == expected_mode
         if art == ArtModeStatus.Unavailable:
@@ -154,10 +162,12 @@ def test_art_status_reconciliation_poll():
 
 
 def test_standby_ignores_cached_art_mode_when_waking():
-    for art in ArtModeStatus:
+    for power, art in (
+        (power, art) for power in ("off", "standby", None) for art in ArtModeStatus
+    ):
         ws = SimpleNamespace(artmode_status=art, set_power_on_request=Mock())
         device = SimpleNamespace(
-            _physical_power_state="standby",
+            _physical_power_state=power,
             _ws=ws,
             state="off",
             async_send_command=AsyncMock(return_value=True),
@@ -200,6 +210,7 @@ def test_ha_startup_in_standby_learns_power_before_waking():
         }
         return device._device_info
 
+    bind_art_status(device)
     device._get_device_spec = spec
     device._async_load_device_info = load
     assert asyncio.run(MEDIA._check_status(device)) is False
@@ -208,11 +219,74 @@ def test_ha_startup_in_standby_learns_power_before_waking():
 
 
 def test_art_service_wakes_a_frame_before_art_channel_discovery():
-    device = SimpleNamespace(
-        _physical_power_state="standby",
-        _state="off",
-        support_art_mode="partial",
-        _async_turn_on=AsyncMock(),
-    )
-    asyncio.run(MEDIA.async_set_art_mode(device))
-    device._async_turn_on.assert_awaited_once_with(True)
+    for power in ("off", "standby", None):
+        device = SimpleNamespace(
+            _physical_power_state=power,
+            _state="off",
+            support_art_mode="partial",
+            _async_turn_on=AsyncMock(),
+        )
+        asyncio.run(MEDIA.async_set_art_mode(device))
+        device._async_turn_on.assert_awaited_once_with(True)
+
+
+def test_deep_standby_requires_known_capabilities_and_both_transports_offline():
+    for spec, connected, expected in [
+        ({"PowerState": "on", "FrameTVSupport": "true"}, False, "off"),
+        ({"FrameTVSupport": "true"}, False, "off"),
+        ({"FrameTVSupport": "true"}, True, "unknown"),
+        ({}, False, None),
+    ]:
+        device = bind_art_status(
+            SimpleNamespace(
+                _device_info={"device": spec} if spec else None,
+                _physical_power_state=None,
+                _host="tv",
+                _st=None,
+                _ws=SimpleNamespace(
+                    artmode_status=ArtModeStatus.On, is_connected=connected
+                ),
+                _get_device_spec=spec.get,
+                _async_load_device_info=AsyncMock(return_value=None),
+            )
+        )
+        assert asyncio.run(MEDIA._check_status(device)) is False
+        attrs = MEDIA.extra_state_attributes(device)
+        assert attrs.get("tv_mode") == expected
+        assert device._physical_power_state == ("off" if expected == "off" else None)
+
+
+def test_awake_art_reconnect_retains_last_valid_mode_but_not_raw_status():
+    for art, expected, playing in [
+        (ArtModeStatus.On, "art", False),
+        (ArtModeStatus.Off, "tv", True),
+    ]:
+        device = bind_art_status(
+            SimpleNamespace(
+                _device_info={"device": {"PowerState": "on"}},
+                _host="tv",
+                _st=None,
+                _ws=SimpleNamespace(artmode_status=art, is_connected=True),
+                _get_device_spec=lambda key: (
+                    "true" if key == "FrameTVSupport" else "on"
+                ),
+                _async_load_device_info=AsyncMock(
+                    return_value={"device": {"PowerState": "on"}}
+                ),
+            )
+        )
+        assert asyncio.run(MEDIA._check_status(device)) is playing
+        device._ws.artmode_status = ArtModeStatus.Unavailable
+        assert asyncio.run(MEDIA._check_status(device)) is playing
+        attrs = MEDIA.extra_state_attributes(device)
+        assert attrs["tv_mode"] == expected
+        assert attrs["art_mode_status"] == "unavailable"
+        device._async_load_device_info.return_value = {
+            "device": {"PowerState": "standby"}
+        }
+        assert asyncio.run(MEDIA._check_status(device)) is False
+        assert MEDIA.extra_state_attributes(device)["tv_mode"] == "off"
+        device._ws.is_connected = False
+        device._async_load_device_info.return_value = None
+        assert asyncio.run(MEDIA._check_status(device)) is False
+        assert MEDIA.extra_state_attributes(device)["tv_mode"] == "off"

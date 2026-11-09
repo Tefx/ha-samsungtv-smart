@@ -15,6 +15,8 @@ For Frame devices reporting `FrameTVSupport=true`, the media-player entity adds
 | `standby` or `off` | Any, including cached Art state | `off` |
 | `on` | `on` | `art` |
 | `on` | `off` | `tv` |
+| Unreachable, known power/Frame capabilities and remote WS disconnected | Any | `off` |
+| `on` | Temporarily unavailable, with a last valid Art state | Last valid `art` or `tv` |
 | Insufficient evidence | Any | `unknown` |
 
 The media-player entity retains upstream semantics: Art Mode is `off` for media
@@ -27,8 +29,23 @@ The fork also:
 - Rejects invalid Art values, queries a healthy Art connection every 15 seconds,
   and notifies HA when the received mode changes.
 - Discovers device power capabilities when HA starts while the TV is sleeping.
-- Gives confirmed standby precedence over cached Art state when requesting wake.
+- Treats unreachable REST plus a disconnected remote WebSocket as deep standby
+  only after power or Frame capabilities have been learned. REST failure with an
+  active remote WebSocket remains unknown; a fresh HA start without discovered
+  capabilities cannot infer deep standby from the integration alone.
+- Retains the last valid Art mode during Art WebSocket reconnects only while REST
+  confirms `PowerState=on`. Without a prior valid mode, the mode remains unknown.
+  `art_mode_status` still exposes the raw unavailable connection state. The cached
+  mode is an estimate until Art communication recovers, with no expiry timer.
+- Gives standby, deep standby and unknown physical power precedence over cached
+  Art state when requesting wake.
 - Allows an Art wake request before the sleeping device establishes its Art channel.
+
+An operator can add a guarded smart-plug fallback for the first discovery after
+HA restart: with mains on and numeric power, use a device-calibrated standby
+threshold and the explicit watch-mode helper. This is an automation estimate,
+not an independent Art API confirmation. Keep a suitable IR wake path available
+for deep standby and verify wake before sending further mode commands.
 
 These changes do not force every power-on into Art Mode. Default-Art versus
 explicit watching remains an operator automation policy. Network power-key

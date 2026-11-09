@@ -264,6 +264,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         # Device information from TV
         self._device_info: dict[str, Any] | None = None
         self._physical_power_state: str | None = None
+        self._last_valid_art_status: ArtModeStatus | None = None
 
         # Save a reference to the imported config
         self._broadcast = config.get(CONF_BROADCAST_ADDRESS)
@@ -522,6 +523,15 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
             return True
         return not self.hass.states.is_state(ext_entity, STATE_OFF)
 
+    def _get_art_status(self):
+        """Retain the last valid Art mode through reconnects on an awake panel."""
+        status = self._ws.artmode_status
+        if status in (ArtModeStatus.On, ArtModeStatus.Off):
+            self._last_valid_art_status = status
+        elif status == ArtModeStatus.Unavailable and self._physical_power_state == "on":
+            return self._last_valid_art_status or status
+        return status
+
     async def _check_status(self):
         """Check TV status with WS and others method to check power status."""
 
@@ -529,17 +539,31 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         # Otherwise the ON-only info loader never discovers this Frame's power API.
         info = None
         self._physical_power_state = None
-        if self._device_info is None or self._get_device_spec("PowerState") is not None:
+        if (
+            self._device_info is None
+            or self._get_device_spec("PowerState") is not None
+            or self._get_device_spec("FrameTVSupport") == "true"
+        ):
             info = await self._async_load_device_info(force=True)
-        if self._get_device_spec("PowerState") is not None:
+        if (
+            self._get_device_spec("PowerState") is not None
+            or self._get_device_spec("FrameTVSupport") == "true"
+        ):
             _LOGGER.debug("Checking if TV %s is on using device info", self._host)
             self._physical_power_state = (
                 info.get("device", {}).get("PowerState") if info else None
             )
+            # Deep standby stops REST as well as the remote WebSocket. Only infer
+            # off after this device's power/Frame capabilities have been learned.
+            if info is None and not self._ws.is_connected:
+                self._physical_power_state = "off"
             return (
                 self._physical_power_state == "on"
-                and self._ws.artmode_status
-                not in (ArtModeStatus.On, ArtModeStatus.Unavailable)
+                and self._get_art_status()
+                not in (
+                    ArtModeStatus.On,
+                    ArtModeStatus.Unavailable,
+                )
             )
 
         result = self._ws.is_connected
@@ -1080,7 +1104,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         if self._get_device_spec("FrameTVSupport") == "true":
             # Standby is distinct from Art Mode, which also reports PowerState=on.
             power = self._physical_power_state
-            art_status = self._ws.artmode_status
+            art_status = self._get_art_status()
             data["tv_mode"] = (
                 "off"
                 if power in ("off", "standby")
@@ -1238,7 +1262,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
         cmd_power_on = "KEY_POWER"
         cmd_power_art = "KEY_POWER"
         # The Art API can retain its last mode while the panel is in standby.
-        panel_awake = self._physical_power_state not in ("off", "standby")
+        panel_awake = self._physical_power_state not in ("off", "standby", None)
         if set_art_mode and panel_awake:
             if self._ws.artmode_status == ArtModeStatus.Off:
                 # art mode from on
@@ -1293,7 +1317,7 @@ class SamsungTVDevice(SamsungTVEntity, MediaPlayerEntity):
     async def async_set_art_mode(self):
         """Turn the media player on setting in art mode."""
         # A sleeping Frame has not established its Art WebSocket after HA startup.
-        if self._physical_power_state in ("off", "standby"):
+        if self._physical_power_state in ("off", "standby", None):
             await self._async_turn_on(True)
         elif (
             self._state == MediaPlayerState.ON
